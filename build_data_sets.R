@@ -1,11 +1,11 @@
-setwd('C:/Users/silve/Documents/math/time_series/final_project')
+setwd('Documentos/math/time_series/final_project')
 
 # Import trends data
 library(readr)
 tr <- read_csv("all_trends.csv")
 # Import consumption data
-cons <- read_csv("PCE.csv")
-colnames(cons) <- c('month', 'consumption')
+cons <- read_csv("DPCE.csv")
+colnames(cons) <- c('month', 'pct_change_consumption') # pct_change_consumption is percent change in consumption
 
 # Format all vars as time series obs
 library(zoo)
@@ -20,9 +20,7 @@ tr$shopping <- ts(tr$shopping, start = c(2004, 1), end = c(2019, 11), frequency 
 tr$travel <- ts(tr$travel, start = c(2004, 1), end = c(2019, 11), frequency = 12)
 
 cons$month <- as.yearmon(cons$month)
-cons$consumption <- ts(cons$consumption, start = c(1959, 1), end = c(2019, 9), frequency = 12)
-# Add log consumption
-cons$logcons <- log(cons$consumption)
+cons$pct_change_consumption <- ts(cons$pct_change_consumption, start = c(1959, 2), end = c(2019, 10), frequency = 12)
 
 # DF-GLS tests for stationarity
 library(urca)
@@ -92,27 +90,23 @@ plot(predict(var_model, n.ahead = 24))
 
 # Examine predictive power of these vars on consumption
 
-# determine stationarity of logcons
-summary(ur.ers(cons$logcons)) # Not stationary # Also not trend-stationary as far as I can tell
-summary(ur.ers(cons$consumption)) # Not stationary
-
-# Is logcons I(1)?
-summary(ur.ers(diff(cons$logcons))) # Yes
+# Is pct_change_consumption stationary?
+summary(ur.ers(cons$pct_change_consumption)) # p < 0.01, no unit root
 
 # Maybe I can ask whether the Google trends Granger-cause changes in consumption?
 
 # Set up variables
 trcons <- data.frame(
-  window(detr$business_industrial, start = c(2004, 1), end = c(2019, 9)),
-  window(detr$finance, start = c(2004, 1), end = c(2019, 9)),
-  window(detr$health, start = c(2004, 1), end = c(2019, 9)),
-  window(detr$hobbies_leisure, start = c(2004, 1), end = c(2019, 9)),
-  window(detr$jobs_education, start = c(2004, 1), end = c(2019, 9)),
-  window(detr$shopping, start = c(2004, 1), end = c(2019, 9)),
-  window(detr$travel, start = c(2004, 1), end = c(2019, 9)),
-  window(diff(cons$logcons), start = c(2004, 1), end = c(2019, 9))
+  window(detr$business_industrial, start = c(2004, 1), end = c(2019, 10)),
+  window(detr$finance, start = c(2004, 1), end = c(2019, 10)),
+  window(detr$health, start = c(2004, 1), end = c(2019, 10)),
+  window(detr$hobbies_leisure, start = c(2004, 1), end = c(2019, 10)),
+  window(detr$jobs_education, start = c(2004, 1), end = c(2019, 10)),
+  window(detr$shopping, start = c(2004, 1), end = c(2019, 10)),
+  window(detr$travel, start = c(2004, 1), end = c(2019, 10)),
+  window(cons$pct_change_consumption, start = c(2004, 1), end = c(2019, 10))
 )
-colnames(trcons) <- c('business_industrial', 'finance', 'health', 'hobbies_leisure', 'jobs_education', 'shopping', 'travel', 'change_consumption')
+colnames(trcons) <- c('business_industrial', 'finance', 'health', 'hobbies_leisure', 'jobs_education', 'shopping', 'travel', 'pct_change_consumption')
 
 # Create simple VAR
 cons_var <- VAR(trcons, lag.max=4)
@@ -126,7 +120,7 @@ causality(cons_var, cause = c('business_industrial', 'finance', 'health', 'hobbi
 VARselect(trcons, lag.max = 12, season = 12) # Best is just one lag; seasonality captures most everything else
 cons_var <- VAR(trcons, p = 1, season = 12)
 causality(cons_var, cause = c('business_industrial', 'finance', 'health', 'hobbies_leisure', 'jobs_education', 'shopping', 'travel'), vcov. = vcovHC(cons_var))
-# p = 0.037 # Still sensitive to changes in lag length, but not nearly as much
+# p \approx 0 # Still sensitive to changes in lag length, but not nearly as much
 
 # Try removing seasonality first?
 desscons <- data.frame(
@@ -137,21 +131,61 @@ desscons <- data.frame(
   trcons$jobs_education - decompose(trcons$jobs_education)$seasonal,
   trcons$shopping - decompose(trcons$shopping)$seasonal,
   trcons$travel - decompose(trcons$travel)$seasonal,
-  trcons$change_consumption
+  trcons$pct_change_consumption
 )
 colnames(desscons) <- colnames(trcons)
 dess_var <- VAR(desscons, p=1) # p=1 still optimal by VARselect
 # VAR coeffs are basically identical to before
 causality(dess_var, cause = c('business_industrial', 'finance', 'health', 'hobbies_leisure', 'jobs_education', 'shopping', 'travel'), vcov. = vcovHC(dess_var))
-# p = 0.033, basically same as before
+# p \approx 0, basically same as before
 
-# Try Granger causality with shopping only.
+# Try Granger causality with finance only (finance has the strongest relationship based on the VAR models).
+# Based on VARselect, 3 lags is optimal for finance, consumption model
+finance_var <- VAR(desscons[c('finance', 'pct_change_consumption')], p = 3) # Eyeballing it, it looks like consumption follows finance, but finance doesn't follow consumption
+causality(finance_var, cause = 'finance', vcov. = vcovHC(finance_var)) # p = 0.0050
 
 # Compare forecast power on consumption with forcast of arma model
 
+# Estimate ARMA model for logcons
+library(aTSA)
+# identify(trcons$change_consumption, p = 6, q = 6) # This takes a bit to run. The minimum AICC is an ARMA(2,0). ARMA(5,5) is also good. I don't know about more lags since it takes too long to run the grid search other wise.
+estimate(trcons$change_consumption, p = 2, q = 0) # All coeffs significant. AIC = -1599, SB = -1590
+estimate(trcons$change_consumption, p = 5, q = 5) # MA 3 and 4 not really significant, but good otherwise. AIC = -1601, SBC = -1565
+# Messing with lags more doesn't seem to help. I'll take the ARMA(5,5) since we'll be using this for forecasts.
+# Fit on all but last 12 months
+arma <- estimate(window(trcons$change_consumption, end = c(2018, 9)), p = 5, q = 5)
+# Create forecasts
+arma_fcast <- forecast(arma, lead = 12, id = seq.Date(from = as.Date('2004-01-01'), to = as.Date('2018-09-01'), by='month'), output = FALSE)
+arma_fcast_series <- zooreg(arma_fcast[,'Forecast'], as.yearmon('2018-10'), freq = 12)
+var_fcast <- predict(cons_var, n.ahead = 12)
+var_fcast_series <- zooreg(var_fcast$fcst$change_consumption[,'fcst'], as.yearmon('2018-10'), freq = 12)
+true_series <- window(trcons$change_consumption, start = c(2018, 10))
+# Doesn't seem like there's a significant difference
+
+# Impulse response on pct_change_consumption
+# Using dess_var and cons_var gives basically identical results, though they're a bit more pronounced with dess_var
+cons_irf <- irf(dess_var, response = 'pct_change_consumption', n.ahead = 11)
+# TODO: create single plot with all impulse responses
+# Impulse response from only finance VAR
+finance_irf <- irf(finance_var, response = 'pct_change_consumption', n.ahead = 11)
+
+
+
+
 # Generate tables
 
-libary(stargazer)
+library(stargazer)
 stargazer(var_model$varresult$business_industrial, var_model$varresult$finance, var_model$varresult$health, var_model$varresult$hobbies_leisure,
-          title = 'VAR coefficients', keep.stat = 'n')
-# ~
+          title = 'Trends VAR coefficients, 1/2', keep.stat = 'n')
+stargazer(var_model$varresult$jobs_education, var_model$varresult$shopping, var_model$varresult$travel,
+          title = 'Trends VAR coefficients, 2/2', keep.stat = 'n')
+
+stargazer(dess_var$varresult$business_industrial, dess_var$varresult$finance, dess_var$varresult$health, dess_var$varresult$hobbies_leisure,
+          title = 'Consumption VAR coefficients, 1/2', keep.stat = 'n')
+stargazer(dess_var$varresult$jobs_education, dess_var$varresult$shopping, dess_var$varresult$travel, dess_var$varresult$pct_change_consumption,
+          title = 'Consumption VAR coefficients, 2/2', keep.stat = 'n')
+
+stargazer(finance_var$varresult,
+          title = 'Finance/Consumption VAR coefficients', keep.stat = 'n')
+
+# Include plot for dess_cons consumption fit?
